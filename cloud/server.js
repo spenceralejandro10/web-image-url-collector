@@ -155,6 +155,23 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    // Browser-friendly OAuth smoke test. The extension uses the device flow below.
+    if (req.method === "GET" && url.pathname === "/auth/google") {
+      if (!googleConfigured()) return html(res, 503, "<h1>Google OAuth no está configurado.</h1>");
+      const deviceId = crypto.randomUUID();
+      const deviceSecret = randomToken(24);
+      const expiresAtMs = Date.now() + 10 * 60 * 1000;
+      await db("create_device_auth", {
+        device_id: deviceId,
+        secret_hash: sha256(deviceSecret),
+        expires_at: new Date(expiresAtMs).toISOString(),
+      });
+      const state = signState({ d: deviceId, s: deviceSecret, e: expiresAtMs });
+      res.statusCode = 302;
+      res.setHeader("Location", `${APP_BASE_URL}/auth/google/start?state=${encodeURIComponent(state)}`);
+      return res.end();
+    }
+
     if (req.method === "POST" && url.pathname === "/api/auth/device/start") {
       if (!googleConfigured()) {
         return json(res, 503, {
