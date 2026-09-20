@@ -18,14 +18,16 @@ const {
   buildZip,
 } = require("./media");
 
-const VERSION = "4.1.1";
+const VERSION = "4.2.0";
 const PORT = Number(process.env.PORT || 8787);
 const APP_BASE_URL = (process.env.APP_BASE_URL || "").replace(/\/$/, "");
 const DB_FUNCTION_URL = process.env.WMC_DB_FUNCTION_URL || "";
 const DB_BACKEND_KEY = process.env.WMC_DB_BACKEND_KEY || "";
 const SESSION_DAYS = Number(process.env.SESSION_DAYS || 90);
 const ZIP_TTL_MS = 30 * 60 * 1000;
+const INGEST_JOB_TTL_MS = 60 * 60 * 1000;
 const zipDownloads = new Map();
+const ingestJobs = new Map();
 const accessTokenCache = new Map();
 
 const DRIVE_TREE = {
@@ -292,13 +294,24 @@ async function uploadToDrive(token, tempPath, name, mime, folderId) {
   return JSON.parse(text);
 }
 
+function compactCollectionId(value) {
+  const raw = String(value || "").trim();
+  const match = raw.match(/^([A-Za-z]+)-0*(\d+)$/);
+  if (!match) return raw || "WMC-1";
+  return `${match[1].toUpperCase()}-${Number(match[2])}`;
+}
+
+function collectionFolderLabel(collection) {
+  return `${compactCollectionId(collection.public_id)} - ${collection.name}`;
+}
+
 async function ensureCollectionFolder(collection, cat, token, userFolders) {
   const existing = await db("get_collection_drive_folder", { collection_id: collection.id, category: cat });
   if (existing?.folder?.drive_folder_id) return existing.folder.drive_folder_id;
   const parentField = DRIVE_TREE[cat]?.field;
   const parentId = parentField ? userFolders[parentField] : null;
   if (!parentId) throw new Error(`No existe carpeta base para ${cat}`);
-  const label = `${collection.public_id} - ${collection.name}`;
+  const label = collectionFolderLabel(collection);
   const folder = await ensureChildFolder(token, parentId, label);
   await db("put_collection_drive_folder", { collection_id: collection.id, category: cat, drive_folder_id: folder.id });
   return folder.id;
@@ -469,6 +482,44 @@ async function mapConcurrent(items, limit, worker) {
   const workers = Array.from({ length: Math.min(Math.max(1, limit), items.length) }, () => run());
   await Promise.all(workers);
   return results;
+}
+
+
+function scheduleIngestJobCleanup(jobId) {
+  setTimeout(() => ingestJobs.delete(jobId), INGEST_JOB_TTL_MS).unref?.();
+}
+
+async function runIngestJob(job, candidates, ctx) {
+  try {
+    job.status = "running";
+    job.startedAt = Date.now();
+    job.updatedAt = Date.now();
+    await mapConcurrent(candidates, 6, async (item, index) => {
+      let result;
+      try {
+        result = { url: item.url, ...(await ingestOne(item, ctx)) };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : JSON.stringify(error);
+        console.error("Fallo ingest:", item.url, message);
+        result = { url: item.url, status: "failed", error: message };
+      }
+      job.results[index] = result;
+      job.processed += 1;
+      if (result.status === "uploaded") job.uploaded += 1;
+      else if (result.status === "duplicate") job.duplicates += 1;
+      else if (result.status === "failed") job.failed += 1;
+      job.updatedAt = Date.now();
+      return result;
+    });
+    job.status = "done";
+    job.finishedAt = Date.now();
+    job.updatedAt = Date.now();
+  } catch (error) {
+    job.status = "failed";
+    job.error = error instanceof Error ? error.message : String(error);
+    job.finishedAt = Date.now();
+    job.updatedAt = Date.now();
+  }
 }
 
 const server = http.createServer(async (req, res) => {
@@ -736,6 +787,91 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+
+    if (req.method === "POST" && url.pathname === "/api/ingest/start") {
+      const current = await requireSession(req);
+      if (!current) return json(res, 401, { ok: false, error: "No autorizado" });
+      const body = await readJson(req);
+      const candidates = Array.isArray(body.candidates) ? body.candidates.slice(0, 1000) : [];
+      if (!candidates.length) return json(res, 400, { error: "No se recibieron recursos." });
+      const collectionName = normalizeCollectionName(body.collectionName);
+      if (!collectionName) return json(res, 400, { error: "Debes escribir un nombre para la colección antes de subir." });
+
+      const token = await accessTokenForUser(current.user.id);
+      const userFolders = await ensureUserDriveFolders(current.user.id, token);
+      const cats = candidates.map(item => category(extFrom(item.url, "", item.extension), "", item.kind)).filter(Boolean);
+      const collection = await resolveCollection(current.user.id, collectionName, cats, body.collectionId || null, token, userFolders);
+
+      const jobId = crypto.randomUUID();
+      const job = {
+        id: jobId,
+        userId: current.user.id,
+        status: "queued",
+        total: candidates.length,
+        processed: 0,
+        uploaded: 0,
+        duplicates: 0,
+        failed: 0,
+        results: new Array(candidates.length),
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        startedAt: null,
+        finishedAt: null,
+        error: null,
+        collectionId: collection.public_id,
+        collectionDisplayId: compactCollectionId(collection.public_id),
+        collectionName: collection.name,
+        folderLabel: collectionFolderLabel(collection),
+      };
+      ingestJobs.set(jobId, job);
+      scheduleIngestJobCleanup(jobId);
+      runIngestJob(job, candidates, { userId: current.user.id, token, collection, userFolders }).catch(error => {
+        job.status = "failed";
+        job.error = error instanceof Error ? error.message : String(error);
+        job.finishedAt = Date.now();
+        job.updatedAt = Date.now();
+      });
+
+      return json(res, 202, {
+        ok: true,
+        jobId,
+        status: job.status,
+        total: job.total,
+        collectionId: job.collectionId,
+        collectionDisplayId: job.collectionDisplayId,
+        collectionName: job.collectionName,
+        folderLabel: job.folderLabel,
+      });
+    }
+
+    if (req.method === "GET" && url.pathname.startsWith("/api/ingest/status/")) {
+      const current = await requireSession(req);
+      if (!current) return json(res, 401, { ok: false, error: "No autorizado" });
+      const jobId = decodeURIComponent(url.pathname.slice("/api/ingest/status/".length));
+      const job = ingestJobs.get(jobId);
+      if (!job || job.userId !== current.user.id) return json(res, 404, { ok: false, error: "Trabajo de subida no encontrado" });
+      const elapsedMs = (job.finishedAt || Date.now()) - (job.startedAt || job.createdAt);
+      const progress = job.total ? Math.min(100, Math.round((job.processed / job.total) * 100)) : 0;
+      return json(res, 200, {
+        ok: true,
+        jobId,
+        status: job.status,
+        total: job.total,
+        processed: job.processed,
+        uploaded: job.uploaded,
+        duplicates: job.duplicates,
+        failed: job.failed,
+        progress,
+        elapsedMs,
+        error: job.error,
+        collectionId: job.collectionId,
+        collectionDisplayId: job.collectionDisplayId,
+        collectionName: job.collectionName,
+        folderLabel: job.folderLabel,
+        results: job.status === "done" || job.status === "failed" ? job.results.filter(Boolean) : undefined,
+      });
+    }
+
     if (req.method === "POST" && url.pathname === "/api/ingest") {
       const current = await requireSession(req);
       if (!current) return json(res, 401, { ok: false, error: "No autorizado" });
@@ -770,7 +906,8 @@ const server = http.createServer(async (req, res) => {
         results,
         collectionId: collection.public_id,
         collectionName: collection.name,
-        folderLabel: `${collection.public_id} - ${collection.name}`,
+        collectionDisplayId: compactCollectionId(collection.public_id),
+        folderLabel: collectionFolderLabel(collection),
       });
     }
 
