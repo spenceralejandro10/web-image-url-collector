@@ -2,7 +2,7 @@ const http = require("node:http");
 const crypto = require("node:crypto");
 const { URL, URLSearchParams } = require("node:url");
 
-const VERSION = "4.0.0";
+const VERSION = "4.0.1";
 const PORT = Number(process.env.PORT || 8787);
 const APP_BASE_URL = (process.env.APP_BASE_URL || "").replace(/\/$/, "");
 const DB_FUNCTION_URL = process.env.WMC_DB_FUNCTION_URL || "";
