@@ -2,7 +2,7 @@ const http = require("node:http");
 const crypto = require("node:crypto");
 const { URL, URLSearchParams } = require("node:url");
 
-const VERSION = "4.0.1";
+const VERSION = "4.0.2";
 const PORT = Number(process.env.PORT || 8787);
 const APP_BASE_URL = (process.env.APP_BASE_URL || "").replace(/\/$/, "");
 const DB_FUNCTION_URL = process.env.WMC_DB_FUNCTION_URL || "";
@@ -151,6 +151,11 @@ const server = http.createServer(async (req, res) => {
         cloud: true,
         databaseConfigured: Boolean(DB_FUNCTION_URL && DB_BACKEND_KEY),
         googleOAuthConfigured: googleConfigured(),
+        oauthChecks: {
+          appBaseUrl: Boolean(APP_BASE_URL),
+          googleClientId: Boolean(process.env.GOOGLE_CLIENT_ID),
+          googleClientSecret: Boolean(process.env.GOOGLE_CLIENT_SECRET),
+        },
         now: new Date().toISOString(),
       });
     }
