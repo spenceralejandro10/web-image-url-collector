@@ -18,7 +18,7 @@ const {
   buildZip,
 } = require("./media");
 
-const VERSION = "4.1.0";
+const VERSION = "4.1.1";
 const PORT = Number(process.env.PORT || 8787);
 const APP_BASE_URL = (process.env.APP_BASE_URL || "").replace(/\/$/, "");
 const DB_FUNCTION_URL = process.env.WMC_DB_FUNCTION_URL || "";
@@ -456,6 +456,21 @@ async function ingestOne(item, ctx) {
   }
 }
 
+async function mapConcurrent(items, limit, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function run() {
+    while (true) {
+      const index = next++;
+      if (index >= items.length) return;
+      results[index] = await worker(items[index], index);
+    }
+  }
+  const workers = Array.from({ length: Math.min(Math.max(1, limit), items.length) }, () => run());
+  await Promise.all(workers);
+  return results;
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     cors(res);
@@ -733,14 +748,15 @@ const server = http.createServer(async (req, res) => {
       const userFolders = await ensureUserDriveFolders(current.user.id, token);
       const cats = candidates.map(item => category(extFrom(item.url, "", item.extension), "", item.kind)).filter(Boolean);
       const collection = await resolveCollection(current.user.id, collectionName, cats, body.collectionId || null, token, userFolders);
-      const results = [];
-      for (const item of candidates) {
-        try { results.push({ url: item.url, ...(await ingestOne(item, { userId: current.user.id, token, collection, userFolders })) }); }
-        catch (error) {
-          console.error("Fallo ingest:", item.url, error.message);
-          results.push({ url: item.url, status: "failed", error: error.message });
+      const results = await mapConcurrent(candidates, 6, async (item) => {
+        try {
+          return { url: item.url, ...(await ingestOne(item, { userId: current.user.id, token, collection, userFolders })) };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : JSON.stringify(error);
+          console.error("Fallo ingest:", item.url, message);
+          return { url: item.url, status: "failed", error: message };
         }
-      }
+      });
       const uploaded = results.filter(r => r.status === "uploaded").length;
       const duplicates = results.filter(r => r.status === "duplicate").length;
       const failed = results.filter(r => r.status === "failed").length;
