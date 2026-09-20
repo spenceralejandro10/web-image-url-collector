@@ -1,0 +1,30 @@
+# Secrets
+.env
+.env.*
+!.env.example
+credentials*.json
+*service-account*.json
+token*.json
+
+# Heavy/user media
+media/
+originals/
+thumbnails/
+downloads/
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.mp4
+*.m4v
+*.mov
+*.webm
+
+# Runtime
+node_modules/
+dist/
+coverage/
+*.db
+*.sqlite
+*.sqlite3
