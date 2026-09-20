@@ -1,0 +1,16 @@
+{
+  "name": "web-media-collector-cloud",
+  "version": "4.0.0",
+  "private": true,
+  "description": "Cloud multi-user backend for Web Media Collector",
+  "main": "server.js",
+  "type": "commonjs",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js && node --check media.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}
