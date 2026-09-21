@@ -14,7 +14,8 @@ Spencer Collector Pro es una extensión de Chrome con panel lateral para:
 4. analizar bytes y metadatos;
 5. generar un ZIP auditable;
 6. subir los recursos seleccionados a Google Drive por colección;
-7. registrar cada activo y sus fuentes en la base de datos.
+7. registrar cada activo y sus fuentes en la base de datos;
+8. actualizar automáticamente el navegador de metadatos en Google Sheets después de cada carga.
 
 La selección es global: solo los recursos seleccionados pasan al análisis, ZIP y Google Drive.
 
@@ -94,6 +95,28 @@ Cada usuario autoriza su propia cuenta. El backend crea o reutiliza la estructur
 Dentro de cada categoría se crean subcarpetas de colección. Los nombres se normalizan antes de crear la colección.
 
 No se deben codificar IDs personales de carpetas en la extensión. Los IDs operativos se guardan por usuario en la base de datos.
+
+## Navegador automático de metadatos
+
+Cada usuario que conecta Google Drive obtiene o reutiliza el archivo **Web Media Collection · Navegador de Metadatos** dentro de su carpeta raíz `Web Media Collection`.
+
+El backend lo sincroniza automáticamente al terminar cada lote de subida. También existe sincronización manual autenticada:
+
+```text
+POST /api/metadata-sheet/sync
+```
+
+Pestañas mantenidas automáticamente:
+
+- **Dashboard**: métricas generales y cobertura.
+- **Navegador**: catálogo completo con filtros.
+- **Hallazgos**: solo activos con señales especialmente interesantes (creador, país, ciudad, cámara/celular, fecha, GPS o descripción).
+- **Cobertura**: porcentaje de archivos que contienen cada tipo de dato.
+- **Colecciones**: relación de colecciones y volumen.
+- **Diccionario**: significado y procedencia de campos.
+- **Metadata cruda**: JSON completo para auditoría.
+
+Los datos no encontrados se mantienen vacíos; el sistema no inventa identidad, ubicación ni dispositivo.
 
 ## Metadatos y catálogo
 

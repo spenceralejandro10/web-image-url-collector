@@ -29,6 +29,8 @@ const INGEST_JOB_TTL_MS = 60 * 60 * 1000;
 const zipDownloads = new Map();
 const ingestJobs = new Map();
 const accessTokenCache = new Map();
+const METADATA_SHEET_NAME = "Web Media Collection · Navegador de Metadatos";
+const METADATA_SHEET_TABS = ["Dashboard", "Navegador", "Hallazgos", "Cobertura", "Colecciones", "Diccionario", "Metadata cruda"];
 
 const DRIVE_TREE = {
   JPG: { name: "JPG", field: "jpg_folder_id" },
@@ -294,6 +296,543 @@ async function uploadToDrive(token, tempPath, name, mime, folderId) {
   return JSON.parse(text);
 }
 
+async function sheetsJson(token, url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    headers: { Authorization: `Bearer ${token}`, ...(options.headers || {}) },
+  });
+  const text = await response.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+  if (!response.ok) throw new Error(`Sheets HTTP ${response.status}: ${text.slice(0, 1000)}`);
+  return data;
+}
+
+function sheetNameA1(name) {
+  return `'${String(name).replace(/'/g, "''")}'`;
+}
+
+function sheetText(value) {
+  if (value == null) return "";
+  let out;
+  if (typeof value === "string") out = value;
+  else if (typeof value === "number" || typeof value === "boolean") return value;
+  else {
+    try { out = JSON.stringify(value); } catch { out = String(value); }
+  }
+  if (/^[=+\-@]/.test(out)) return "'" + out;
+  return out;
+}
+
+function metadataPick(...values) {
+  for (const value of values) {
+    if (value == null) continue;
+    if (Array.isArray(value)) {
+      const joined = value.map(v => metadataPick(v)).filter(Boolean).join(", ");
+      if (joined) return joined;
+      continue;
+    }
+    if (typeof value === "object") {
+      const likely = value.value ?? value.description ?? value.name ?? value.author ?? value.creator;
+      if (likely != null) {
+        const nested = metadataPick(likely);
+        if (nested) return nested;
+      }
+      continue;
+    }
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+function validGps(lat, lon) {
+  const a = Number(lat);
+  const b = Number(lon);
+  return Number.isFinite(a) && Number.isFinite(b) && !(a === 0 && b === 0);
+}
+
+function latestSourceMap(sources) {
+  const map = new Map();
+  for (const source of sources || []) {
+    if (!map.has(source.asset_id)) map.set(source.asset_id, source);
+  }
+  return map;
+}
+
+function collectionLabelsByAsset(collections, memberships) {
+  const byId = new Map((collections || []).map(c => [String(c.id), c]));
+  const out = new Map();
+  for (const member of memberships || []) {
+    const c = byId.get(String(member.collection_id));
+    if (!c) continue;
+    const label = `${compactCollectionId(c.public_id)} · ${c.name}`;
+    const arr = out.get(member.asset_id) || [];
+    arr.push(label);
+    out.set(member.asset_id, arr);
+  }
+  return out;
+}
+
+function assetSignals(asset, source) {
+  const meta = asset.metadata_json || {};
+  const embedded = meta.embedded || {};
+  const parsed = embedded.parsed || {};
+  const descriptive = meta.descriptive || {};
+  const exif = meta.exif || {};
+  const sourceMeta = meta.source || {};
+  const creator = metadataPick(
+    descriptive.creator,
+    descriptive.author,
+    exif.creator,
+    exif.artist,
+    parsed.Artist,
+    parsed.Creator,
+    parsed.Author,
+    parsed.XPAuthor,
+    parsed.Copyright
+  );
+  const country = metadataPick(asset.country, descriptive.country, parsed.Country, parsed.CountryName);
+  const city = metadataPick(asset.city, descriptive.city, parsed.City);
+  const camera = [metadataPick(asset.camera_make), metadataPick(asset.camera_model)].filter(Boolean).join(" ").trim();
+  const captured = metadataPick(asset.captured_at, parsed.DateTimeOriginal, parsed.CreateDate, parsed.DateTimeDigitized);
+  const gps = validGps(asset.latitude, asset.longitude)
+    ? `${Number(asset.latitude).toFixed(6)}, ${Number(asset.longitude).toFixed(6)}`
+    : "";
+  const description = metadataPick(asset.description, descriptive.description, parsed.Description, parsed.ImageDescription, parsed.Caption);
+  const altAria = metadataPick(source?.alt_text, sourceMeta.alt, sourceMeta.aria);
+  const title = metadataPick(source?.title, sourceMeta.title);
+  const context = metadataPick(source?.context_text, sourceMeta.context);
+  return {
+    creator,
+    country,
+    city,
+    camera,
+    captured,
+    gps,
+    description,
+    altAria,
+    title,
+    context,
+    sourcePage: metadataPick(source?.source_page, sourceMeta.pageUrl),
+    directUrl: metadataPick(source?.source_url, sourceMeta.directUrl),
+  };
+}
+
+async function findMetadataSpreadsheet(token, rootFolderId) {
+  const q = `'${driveQueryEscape(rootFolderId)}' in parents and name = '${driveQueryEscape(METADATA_SHEET_NAME)}' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false`;
+  const params = new URLSearchParams({ q, fields: "files(id,name,mimeType,parents,webViewLink)", pageSize: "20" });
+  const data = await driveJson(token, `https://www.googleapis.com/drive/v3/files?${params.toString()}`);
+  return (data.files || [])[0] || null;
+}
+
+async function createMetadataSpreadsheet(token, rootFolderId) {
+  return driveJson(token, "https://www.googleapis.com/drive/v3/files?fields=id,name,mimeType,parents,webViewLink", {
+    method: "POST",
+    headers: { "Content-Type": "application/json; charset=UTF-8" },
+    body: JSON.stringify({
+      name: METADATA_SHEET_NAME,
+      mimeType: "application/vnd.google-apps.spreadsheet",
+      parents: [rootFolderId],
+    }),
+  });
+}
+
+async function ensureMetadataTabs(token, spreadsheetId) {
+  let meta = await sheetsJson(
+    token,
+    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}?fields=sheets(properties(sheetId,title,index))`
+  );
+  let sheets = meta.sheets || [];
+  const titles = new Set(sheets.map(s => s.properties?.title).filter(Boolean));
+  const requests = [];
+
+  if (!titles.has("Dashboard") && sheets.length === 1) {
+    requests.push({
+      updateSheetProperties: {
+        properties: { sheetId: sheets[0].properties.sheetId, title: "Dashboard" },
+        fields: "title",
+      },
+    });
+    titles.delete(sheets[0].properties.title);
+    titles.add("Dashboard");
+  }
+
+  for (const title of METADATA_SHEET_TABS) {
+    if (!titles.has(title)) requests.push({ addSheet: { properties: { title } } });
+  }
+
+  if (requests.length) {
+    await sheetsJson(
+      token,
+      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}:batchUpdate`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=UTF-8" },
+        body: JSON.stringify({ requests }),
+      }
+    );
+    meta = await sheetsJson(
+      token,
+      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}?fields=sheets(properties(sheetId,title,index))`
+    );
+    sheets = meta.sheets || [];
+  }
+  return sheets;
+}
+
+async function formatMetadataSpreadsheet(token, spreadsheetId, sheets) {
+  const byTitle = new Map((sheets || []).map(s => [s.properties.title, s.properties.sheetId]));
+  const requests = [];
+  const dark = { red: 0.09, green: 0.13, blue: 0.20 };
+  const blue = { red: 0.09, green: 0.36, blue: 0.83 };
+  const light = { red: 0.94, green: 0.96, blue: 0.98 };
+  const white = { red: 1, green: 1, blue: 1 };
+
+  for (const title of METADATA_SHEET_TABS) {
+    const sheetId = byTitle.get(title);
+    if (sheetId == null) continue;
+    requests.push({
+      repeatCell: {
+        range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
+        cell: { userEnteredFormat: { backgroundColor: dark, textFormat: { foregroundColor: white, bold: true, fontSize: 15 } } },
+        fields: "userEnteredFormat(backgroundColor,textFormat)",
+      },
+    });
+    requests.push({
+      repeatCell: {
+        range: { sheetId, startRowIndex: 2, endRowIndex: 3 },
+        cell: { userEnteredFormat: { backgroundColor: blue, textFormat: { foregroundColor: white, bold: true }, wrapStrategy: "WRAP" } },
+        fields: "userEnteredFormat(backgroundColor,textFormat,wrapStrategy)",
+      },
+    });
+    requests.push({
+      updateSheetProperties: {
+        properties: { sheetId, gridProperties: { frozenRowCount: 3 } },
+        fields: "gridProperties.frozenRowCount",
+      },
+    });
+  }
+
+  const navId = byTitle.get("Navegador");
+  if (navId != null) {
+    requests.push({
+      updateDimensionProperties: {
+        range: { sheetId: navId, dimension: "COLUMNS", startIndex: 0, endIndex: 28 },
+        properties: { pixelSize: 150 },
+        fields: "pixelSize",
+      },
+    });
+  }
+  const rawId = byTitle.get("Metadata cruda");
+  if (rawId != null) {
+    requests.push({
+      updateDimensionProperties: {
+        range: { sheetId: rawId, dimension: "COLUMNS", startIndex: 1, endIndex: 2 },
+        properties: { pixelSize: 700 },
+        fields: "pixelSize",
+      },
+    });
+  }
+  const findsId = byTitle.get("Hallazgos");
+  if (findsId != null) {
+    requests.push({
+      repeatCell: {
+        range: { sheetId: findsId, startRowIndex: 3, endRowIndex: 2000, startColumnIndex: 0, endColumnIndex: 13 },
+        cell: { userEnteredFormat: { backgroundColor: light, wrapStrategy: "WRAP", verticalAlignment: "TOP" } },
+        fields: "userEnteredFormat(wrapStrategy,verticalAlignment)",
+      },
+    });
+  }
+
+  if (requests.length) {
+    await sheetsJson(
+      token,
+      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}:batchUpdate`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=UTF-8" },
+        body: JSON.stringify({ requests }),
+      }
+    );
+  }
+}
+
+async function syncMetadataSpreadsheet(userId, token, userFolders) {
+  const startedAt = Date.now();
+  let spreadsheet = await findMetadataSpreadsheet(token, userFolders.root_folder_id);
+  const created = !spreadsheet;
+  if (!spreadsheet) spreadsheet = await createMetadataSpreadsheet(token, userFolders.root_folder_id);
+
+  const sheets = await ensureMetadataTabs(token, spreadsheet.id);
+  const catalog = await db("list_metadata_catalog", { user_id: userId });
+  const assets = catalog.assets || [];
+  const sources = catalog.sources || [];
+  const collections = catalog.collections || [];
+  const memberships = catalog.memberships || [];
+
+  const sourceMap = latestSourceMap(sources);
+  const collectionMap = collectionLabelsByAsset(collections, memberships);
+  const rows = [];
+  const findings = [];
+  const rawRows = [];
+  const formatCounts = new Map();
+
+  let images = 0;
+  let videos = 0;
+  const coverageCounts = {
+    creator: 0, country: 0, city: 0, camera: 0, captured: 0, gps: 0,
+    description: 0, altAria: 0, titleContext: 0, sourcePage: 0, drive: 0,
+  };
+
+  for (const asset of assets) {
+    const source = sourceMap.get(asset.id) || null;
+    const sig = assetSignals(asset, source);
+    const type = String(asset.media_type || "").toLowerCase() === "video" ? "video" : "image";
+    if (type === "video") videos += 1; else images += 1;
+    const format = String(asset.format || asset.media_type || "sin formato").toUpperCase();
+    formatCounts.set(format, (formatCounts.get(format) || 0) + 1);
+    const collectionsText = (collectionMap.get(asset.id) || []).join(", ");
+    const dims = asset.width && asset.height ? `${asset.width} × ${asset.height}` : "";
+    const mb = asset.byte_size ? Math.round((Number(asset.byte_size) / 1048576) * 1000) / 1000 : "";
+    const titleContext = [sig.title, sig.context].filter(Boolean).join(" · ");
+    const driveUrl = asset.drive_file_id ? `https://drive.google.com/file/d/${asset.drive_file_id}/view` : "";
+
+    if (sig.creator) coverageCounts.creator++;
+    if (sig.country) coverageCounts.country++;
+    if (sig.city) coverageCounts.city++;
+    if (sig.camera) coverageCounts.camera++;
+    if (sig.captured) coverageCounts.captured++;
+    if (sig.gps) coverageCounts.gps++;
+    if (sig.description) coverageCounts.description++;
+    if (sig.altAria) coverageCounts.altAria++;
+    if (titleContext) coverageCounts.titleContext++;
+    if (sig.sourcePage) coverageCounts.sourcePage++;
+    if (asset.drive_file_id) coverageCounts.drive++;
+
+    rows.push([
+      asset.human_id || "",
+      collectionsText,
+      type,
+      asset.format || "",
+      asset.filename || "",
+      asset.display_name || "",
+      sig.creator,
+      sig.country,
+      sig.city,
+      sig.camera,
+      sig.captured,
+      sig.gps,
+      dims,
+      mb,
+      sig.description,
+      sig.sourcePage,
+      sig.directUrl,
+      driveUrl,
+      asset.sha256 || "",
+      asset.mime_type || "",
+      asset.iso ?? "",
+      asset.exposure_time || "",
+      asset.aperture ?? "",
+      asset.focal_length ?? "",
+      asset.software || "",
+      sig.altAria,
+      titleContext,
+      asset.created_at || "",
+    ].map(sheetText));
+
+    const score = [sig.creator, sig.country, sig.city, sig.camera, sig.captured, sig.gps, sig.description].filter(Boolean).length;
+    if (score > 0) {
+      findings.push([
+        asset.human_id || "",
+        score,
+        type,
+        asset.format || "",
+        sig.creator,
+        sig.country,
+        sig.city,
+        sig.camera,
+        sig.captured,
+        sig.gps,
+        sig.description,
+        collectionsText,
+        driveUrl,
+      ].map(sheetText));
+    }
+
+    rawRows.push([
+      asset.human_id || "",
+      sheetText(asset.metadata_json || {}),
+      sig.directUrl,
+    ]);
+  }
+
+  findings.sort((a, b) => Number(b[1]) - Number(a[1]) || String(a[0]).localeCompare(String(b[0])));
+
+  const coverage = [
+    ["Creador / persona", coverageCounts.creator, assets.length, assets.length ? coverageCounts.creator / assets.length : 0, "EXIF/IPTC/XMP/Artist; no reconocimiento visual"],
+    ["País", coverageCounts.country, assets.length, assets.length ? coverageCounts.country / assets.length : 0, "Metadatos explícitos"],
+    ["Ciudad", coverageCounts.city, assets.length, assets.length ? coverageCounts.city / assets.length : 0, "Metadatos explícitos"],
+    ["Cámara / celular", coverageCounts.camera, assets.length, assets.length ? coverageCounts.camera / assets.length : 0, "Fabricante y modelo"],
+    ["Fecha de captura", coverageCounts.captured, assets.length, assets.length ? coverageCounts.captured / assets.length : 0, "EXIF/XMP"],
+    ["GPS válido", coverageCounts.gps, assets.length, assets.length ? coverageCounts.gps / assets.length : 0, "Latitud/longitud distintas de 0,0"],
+    ["Descripción", coverageCounts.description, assets.length, assets.length ? coverageCounts.description / assets.length : 0, "EXIF/IPTC/XMP"],
+    ["ALT / ARIA", coverageCounts.altAria, assets.length, assets.length ? coverageCounts.altAria / assets.length : 0, "Contexto de la página fuente"],
+    ["Título / contexto", coverageCounts.titleContext, assets.length, assets.length ? coverageCounts.titleContext / assets.length : 0, "Página fuente"],
+    ["Página fuente", coverageCounts.sourcePage, assets.length, assets.length ? coverageCounts.sourcePage / assets.length : 0, "Página donde se detectó"],
+    ["Archivo en Drive", coverageCounts.drive, assets.length, assets.length ? coverageCounts.drive / assets.length : 0, "Google Drive"],
+  ];
+
+  const collectionCounts = new Map();
+  for (const m of memberships) collectionCounts.set(String(m.collection_id), (collectionCounts.get(String(m.collection_id)) || 0) + 1);
+  const collectionRows = collections.map(c => [
+    compactCollectionId(c.public_id),
+    c.name,
+    collectionCounts.get(String(c.id)) || 0,
+    c.created_at || "",
+  ]);
+
+  const navHeaders = ["ID","Colección(es)","Tipo","Formato","Archivo","Nombre sugerido","Creador / persona","País","Ciudad","Cámara / celular","Fecha captura","GPS","Dimensiones","Tamaño MB","Descripción","Página fuente","URL directa","Abrir en Drive","SHA-256","MIME","ISO","Exposición","Apertura","Focal","Software","ALT / ARIA","Título / contexto","Fecha registro"];
+  const hallHeaders = ["ID","Señales","Tipo","Formato","Creador / persona","País","Ciudad","Cámara / celular","Fecha captura","GPS","Descripción","Colección(es)","Abrir en Drive"];
+  const dictRows = [
+    ["ID","Identificador humano estable del activo","Base de datos","Ej. IMG-01 / VID-01"],
+    ["Colección(es)","Colecciones a las que pertenece el activo","Supabase","ID público + nombre"],
+    ["Creador / persona","Autor/Artist/Creator embebido cuando existe","EXIF/IPTC/XMP","No identifica visualmente a una persona"],
+    ["País","País respaldado por metadatos","Metadatos","Vacío si no hay evidencia"],
+    ["Ciudad","Ciudad respaldada por metadatos","Metadatos","Vacío si no hay evidencia"],
+    ["Cámara / celular","Fabricante y modelo del dispositivo","EXIF","Puede revelar cámara o teléfono si sobrevivió al procesamiento"],
+    ["Fecha captura","Fecha/hora original de captura","EXIF/XMP",""],
+    ["GPS","Latitud y longitud válidas","EXIF GPS","0,0 se trata como ausencia"],
+    ["Descripción","Descripción embebida","EXIF/IPTC/XMP",""],
+    ["Página fuente","Página donde se detectó el recurso","Captura web",""],
+    ["URL directa","URL del recurso detectado","Captura web",""],
+    ["Abrir en Drive","Enlace al archivo almacenado","Google Drive",""],
+    ["SHA-256","Huella exacta de bytes","Backend","Identidad exacta para duplicados"],
+    ["ALT / ARIA","Texto accesible de la fuente","Página web",""],
+    ["Título / contexto","Título y texto contextual detectado","Página web",""],
+    ["Metadata cruda","JSON completo del análisis","Metadata cruda","Conserva campos adicionales"],
+  ];
+
+  const dashboard = [
+    ["WEB MEDIA COLLECTION · NAVEGADOR DE METADATOS"],
+    ["Actualización automática después de cada carga a Google Drive. Solo muestra datos respaldados por archivo o fuente."],
+    [],
+    ["Métrica","Valor"],
+    ["Activos registrados", assets.length],
+    ["Imágenes", images],
+    ["Videos", videos],
+    ["Colecciones", collections.length],
+    ["Hallazgos interesantes", findings.length],
+    ["Con creador/persona", coverageCounts.creator],
+    ["Con país", coverageCounts.country],
+    ["Con ciudad", coverageCounts.city],
+    ["Con cámara/celular", coverageCounts.camera],
+    ["Con fecha de captura", coverageCounts.captured],
+    ["Con GPS válido", coverageCounts.gps],
+    ["Con descripción", coverageCounts.description],
+    [],
+    ["Formato","Cantidad"],
+    ...[...formatCounts.entries()].sort((a,b) => b[1] - a[1]),
+    [],
+    ["Última actualización", new Date().toISOString()],
+  ];
+
+  const payloads = [
+    { range: `${sheetNameA1("Dashboard")}!A1:H${Math.max(25, dashboard.length + 2)}`, values: dashboard },
+    { range: `${sheetNameA1("Navegador")}!A1:AB${Math.max(4, rows.length + 3)}`, values: [
+      ["NAVEGADOR DE ACTIVOS"],
+      ["Usa los filtros para localizar imágenes por ID, colección, formato, creador, ubicación, cámara, fecha y otros campos."],
+      navHeaders,
+      ...rows,
+    ]},
+    { range: `${sheetNameA1("Hallazgos")}!A1:M${Math.max(4, findings.length + 3)}`, values: [
+      ["HALLAZGOS INTERESANTES"],
+      ["Solo aparecen activos con al menos una señal especialmente útil: creador, país, ciudad, cámara/celular, fecha, GPS o descripción."],
+      hallHeaders,
+      ...findings,
+    ]},
+    { range: `${sheetNameA1("Cobertura")}!A1:E${Math.max(4, coverage.length + 3)}`, values: [
+      ["COBERTURA DE METADATOS"],
+      ["Mide cuántos activos tienen cada dato realmente disponible."],
+      ["Campo","Con dato","Total","Cobertura","Origen / regla"],
+      ...coverage,
+    ]},
+    { range: `${sheetNameA1("Colecciones")}!A1:D${Math.max(4, collectionRows.length + 3)}`, values: [
+      ["COLECCIONES"],
+      ["Colecciones registradas y cantidad de activos asociados."],
+      ["ID","Nombre","Activos","Creada"],
+      ...collectionRows,
+    ]},
+    { range: `${sheetNameA1("Diccionario")}!A1:D${Math.max(4, dictRows.length + 3)}`, values: [
+      ["DICCIONARIO DE DATOS"],
+      ["Qué significa cada columna y de dónde proviene."],
+      ["Campo","Descripción","Origen","Regla / nota"],
+      ...dictRows,
+    ]},
+    { range: `${sheetNameA1("Metadata cruda")}!A1:C${Math.max(4, rawRows.length + 3)}`, values: [
+      ["METADATA CRUDA"],
+      ["JSON completo por activo para auditoría y análisis posterior."],
+      ["ID","Metadata JSON","URL directa"],
+      ...rawRows,
+    ]},
+  ];
+
+  await sheetsJson(
+    token,
+    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheet.id)}/values:batchClear`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=UTF-8" },
+      body: JSON.stringify({ ranges: METADATA_SHEET_TABS.map(title => `${sheetNameA1(title)}!A:AZ`) }),
+    }
+  );
+
+  await sheetsJson(
+    token,
+    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheet.id)}/values:batchUpdate`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=UTF-8" },
+      body: JSON.stringify({ valueInputOption: "USER_ENTERED", data: payloads }),
+    }
+  );
+
+  if (created) {
+    await formatMetadataSpreadsheet(token, spreadsheet.id, sheets);
+  }
+
+  return {
+    ok: true,
+    spreadsheetId: spreadsheet.id,
+    spreadsheetUrl: `https://docs.google.com/spreadsheets/d/${spreadsheet.id}/edit`,
+    assets: assets.length,
+    findings: findings.length,
+    durationMs: Date.now() - startedAt,
+  };
+}
+
+async function syncMetadataForUser(userId, token = null, userFolders = null) {
+  const accessToken = token || await accessTokenForUser(userId);
+  const folders = userFolders || await ensureUserDriveFolders(userId, accessToken);
+  return syncMetadataSpreadsheet(userId, accessToken, folders);
+}
+
+async function syncAllMetadataSheetsOnStartup() {
+  try {
+    const result = await db("list_metadata_users");
+    for (const row of result.users || []) {
+      try {
+        const synced = await syncMetadataForUser(row.user_id);
+        console.log(`Metadata Sheet sincronizado para ${row.user_id}: ${synced.assets} activos, ${synced.findings} hallazgos`);
+      } catch (error) {
+        console.warn(`No se pudo sincronizar Metadata Sheet para ${row.user_id}: ${error.message}`);
+      }
+    }
+  } catch (error) {
+    console.warn("No se pudo iniciar la sincronización automática de Metadata Sheets:", error.message);
+  }
+}
+
 function compactCollectionId(value) {
   const raw = String(value || "").trim();
   const match = raw.match(/^([A-Za-z]+)-0*(\d+)$/);
@@ -511,6 +1050,15 @@ async function runIngestJob(job, candidates, ctx) {
       job.updatedAt = Date.now();
       return result;
     });
+    job.sheetSync = { status: "running" };
+    try {
+      const sheet = await syncMetadataForUser(ctx.userId, ctx.token, ctx.userFolders);
+      job.sheetSync = { status: "done", ...sheet };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn("No se pudo sincronizar el navegador de metadatos:", message);
+      job.sheetSync = { status: "failed", error: message };
+    }
     job.status = "done";
     job.finishedAt = Date.now();
     job.updatedAt = Date.now();
@@ -541,6 +1089,8 @@ const server = http.createServer(async (req, res) => {
         cloud: true,
         databaseConfigured: Boolean(DB_FUNCTION_URL && DB_BACKEND_KEY),
         googleOAuthConfigured: googleConfigured(),
+        metadataSheetAutoSync: true,
+        metadataSheetName: METADATA_SHEET_NAME,
         oauthChecks: {
           appBaseUrl: Boolean(APP_BASE_URL),
           googleClientId: Boolean(process.env.GOOGLE_CLIENT_ID),
@@ -868,6 +1418,7 @@ const server = http.createServer(async (req, res) => {
         collectionDisplayId: job.collectionDisplayId,
         collectionName: job.collectionName,
         folderLabel: job.folderLabel,
+        sheetSync: job.sheetSync || null,
         results: job.status === "done" || job.status === "failed" ? job.results.filter(Boolean) : undefined,
       });
     }
@@ -896,6 +1447,14 @@ const server = http.createServer(async (req, res) => {
       const uploaded = results.filter(r => r.status === "uploaded").length;
       const duplicates = results.filter(r => r.status === "duplicate").length;
       const failed = results.filter(r => r.status === "failed").length;
+      let sheetSync;
+      try {
+        sheetSync = await syncMetadataForUser(current.user.id, token, userFolders);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn("No se pudo sincronizar el navegador de metadatos:", message);
+        sheetSync = { ok: false, error: message };
+      }
       return json(res, 200, {
         ok: true,
         total: candidates.length,
@@ -908,7 +1467,15 @@ const server = http.createServer(async (req, res) => {
         collectionName: collection.name,
         collectionDisplayId: compactCollectionId(collection.public_id),
         folderLabel: collectionFolderLabel(collection),
+        sheetSync,
       });
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/metadata-sheet/sync") {
+      const current = await requireSession(req);
+      if (!current) return json(res, 401, { ok: false, error: "No autorizado" });
+      const synced = await syncMetadataForUser(current.user.id);
+      return json(res, 200, synced);
     }
 
     return json(res, 404, { ok: false, error: "Not found" });
@@ -920,4 +1487,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Web Media Collector Cloud ${VERSION} listening on port ${PORT}`);
+  setTimeout(() => {
+    syncAllMetadataSheetsOnStartup().catch(error => console.warn("Metadata startup sync:", error.message));
+  }, 2500).unref?.();
 });
