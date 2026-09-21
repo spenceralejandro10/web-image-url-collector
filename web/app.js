@@ -1,5 +1,0 @@
-const gallery=document.querySelector('#gallery');const summary=document.querySelector('#summary');const filters=['q','type','format','country','city','year','camera'];
-document.querySelectorAll('[data-size]').forEach(b=>b.onclick=()=>gallery.className='gallery '+b.dataset.size);
-filters.forEach(id=>document.querySelector('#'+id).addEventListener('input',load));
-async function load(){const p=new URLSearchParams();filters.forEach(id=>{const v=document.querySelector('#'+id).value.trim();if(v)p.set(id,v)});try{const r=await fetch('http://127.0.0.1:8787/api/assets?'+p);const d=await r.json();summary.textContent=`${d.total||0} elementos`;if(!d.items?.length){gallery.innerHTML='<div class="empty">No hay elementos para estos filtros.</div>';return}gallery.innerHTML=d.items.map(a=>`<article class="card"><img loading="lazy" src="${a.thumbnailUrl||''}" alt=""><div class="meta"><strong>${a.displayName||a.humanId}</strong><div>${[a.format,a.city,a.country].filter(Boolean).join(' · ')}</div></div></article>`).join('')}catch{summary.textContent='Servidor local desconectado';}}
-load();
