@@ -259,3 +259,8 @@ Antes de modificar producción:
 - Los tokens de Google se cifran antes de persistirse.
 - Las cuentas de Drive son independientes por usuario.
 - Los metadatos descriptivos deben ser trazables; no se deben inferir identidades personales sin evidencia.
+
+
+## Estado de sincronización automática
+
+La sincronización del navegador de metadatos está integrada en producción: al terminar cada lote de subida, el backend actualiza Google Sheets y recalcula Dashboard, Hallazgos, Cobertura, Colecciones, Diccionario y Metadata cruda.
