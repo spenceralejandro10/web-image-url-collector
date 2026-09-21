@@ -100,7 +100,9 @@ No se deben codificar IDs personales de carpetas en la extensión. Los IDs opera
 
 Cada usuario que conecta Google Drive obtiene o reutiliza el archivo **Web Media Collection · Navegador de Metadatos** dentro de su carpeta raíz `Web Media Collection`.
 
-El backend lo sincroniza automáticamente al terminar cada lote de subida. También existe sincronización manual autenticada:
+El backend lo sincroniza automáticamente al terminar cada lote de subida y además reconcilia periódicamente el catálogo con el contenido que realmente sigue dentro de **Web Media Collection**. Las eliminaciones manuales de Drive se reflejan en el navegador sin destruir el historial interno: los activos ausentes se marcan como no presentes y dejan de mostrarse; si el archivo vuelve a aparecer con el mismo ID, puede reactivarse.
+
+La reconciliación periódica se ejecuta aproximadamente cada **2 minutos** mientras el backend está activo. También existe sincronización manual autenticada:
 
 ```text
 POST /api/metadata-sheet/sync

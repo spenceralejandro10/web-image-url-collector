@@ -296,6 +296,76 @@ async function uploadToDrive(token, tempPath, name, mime, folderId) {
   return JSON.parse(text);
 }
 
+async function listDriveChildren(token, folderId) {
+  const out = [];
+  let pageToken = "";
+  do {
+    const q = `'${driveQueryEscape(folderId)}' in parents and trashed = false`;
+    const params = new URLSearchParams({
+      q,
+      fields: "nextPageToken,files(id,name,mimeType,parents,shortcutDetails(targetId))",
+      pageSize: "1000",
+    });
+    if (pageToken) params.set("pageToken", pageToken);
+    const data = await driveJson(token, `https://www.googleapis.com/drive/v3/files?${params.toString()}`);
+    out.push(...(data.files || []));
+    pageToken = data.nextPageToken || "";
+  } while (pageToken);
+  return out;
+}
+
+async function scanManagedDriveFiles(token, userFolders) {
+  const activeFileIds = new Set();
+  const visitedFolders = new Set();
+
+  // Discover category folders from the live root rather than trusting cached IDs.
+  const rootChildren = await listDriveChildren(token, userFolders.root_folder_id);
+  const categoryNames = new Set(Object.values(DRIVE_TREE).map(x => x.name));
+  const queue = rootChildren
+    .filter(file => file.mimeType === "application/vnd.google-apps.folder" && categoryNames.has(file.name))
+    .map(file => file.id);
+
+  while (queue.length) {
+    const folderId = queue.shift();
+    if (!folderId || visitedFolders.has(folderId)) continue;
+    visitedFolders.add(folderId);
+    let children = [];
+    try {
+      children = await listDriveChildren(token, folderId);
+    } catch (error) {
+      console.warn(`No se pudo revisar carpeta Drive ${folderId}:`, error.message);
+      continue;
+    }
+    for (const file of children) {
+      if (file.mimeType === "application/vnd.google-apps.folder") {
+        queue.push(file.id);
+      } else if (file.mimeType === "application/vnd.google-apps.shortcut") {
+        if (file.shortcutDetails?.targetId) activeFileIds.add(file.shortcutDetails.targetId);
+      } else if (file.id) {
+        activeFileIds.add(file.id);
+      }
+    }
+  }
+
+  return {
+    activeFileIds: [...activeFileIds],
+    scannedFolders: visitedFolders.size,
+  };
+}
+
+async function reconcileDriveCatalog(userId, token, userFolders) {
+  const scan = await scanManagedDriveFiles(token, userFolders);
+  const result = await db("reconcile_drive_catalog", {
+    user_id: userId,
+    active_drive_file_ids: scan.activeFileIds,
+  });
+  return {
+    ...result,
+    scannedFolders: scan.scannedFolders,
+    discoveredFiles: scan.activeFileIds.length,
+  };
+}
+
 async function sheetsJson(token, url, options = {}) {
   const response = await fetch(url, {
     ...options,
@@ -566,10 +636,12 @@ async function syncMetadataSpreadsheet(userId, token, userFolders) {
 
   const sheets = await ensureMetadataTabs(token, spreadsheet.id);
   const catalog = await db("list_metadata_catalog", { user_id: userId });
-  const assets = catalog.assets || [];
-  const sources = catalog.sources || [];
+  const allAssets = catalog.assets || [];
+  const assets = allAssets.filter(asset => asset.drive_present !== false);
+  const activeAssetIds = new Set(assets.map(asset => asset.id));
+  const sources = (catalog.sources || []).filter(source => activeAssetIds.has(source.asset_id));
   const collections = catalog.collections || [];
-  const memberships = catalog.memberships || [];
+  const memberships = (catalog.memberships || []).filter(member => activeAssetIds.has(member.asset_id));
 
   const sourceMap = latestSourceMap(sources);
   const collectionMap = collectionLabelsByAsset(collections, memberships);
@@ -641,7 +713,8 @@ async function syncMetadataSpreadsheet(userId, token, userFolders) {
       asset.created_at || "",
     ].map(sheetText));
 
-    const score = [sig.creator, sig.country, sig.city, sig.camera, sig.captured, sig.gps, sig.description].filter(Boolean).length;
+    const contextualClue = sig.context && String(sig.context).trim().length >= 20 ? sig.context : "";
+    const score = [sig.creator, sig.country, sig.city, sig.camera, sig.captured, sig.gps, sig.description, contextualClue].filter(Boolean).length;
     if (score > 0) {
       findings.push([
         asset.human_id || "",
@@ -655,6 +728,7 @@ async function syncMetadataSpreadsheet(userId, token, userFolders) {
         sig.captured,
         sig.gps,
         sig.description,
+        contextualClue,
         collectionsText,
         driveUrl,
       ].map(sheetText));
@@ -685,7 +759,8 @@ async function syncMetadataSpreadsheet(userId, token, userFolders) {
 
   const collectionCounts = new Map();
   for (const m of memberships) collectionCounts.set(String(m.collection_id), (collectionCounts.get(String(m.collection_id)) || 0) + 1);
-  const collectionRows = collections.map(c => [
+  const activeCollections = collections.filter(c => (collectionCounts.get(String(c.id)) || 0) > 0);
+  const collectionRows = activeCollections.map(c => [
     compactCollectionId(c.public_id),
     c.name,
     collectionCounts.get(String(c.id)) || 0,
@@ -693,7 +768,7 @@ async function syncMetadataSpreadsheet(userId, token, userFolders) {
   ]);
 
   const navHeaders = ["ID","Colección(es)","Tipo","Formato","Archivo","Nombre sugerido","Creador / persona","País","Ciudad","Cámara / celular","Fecha captura","GPS","Dimensiones","Tamaño MB","Descripción","Página fuente","URL directa","Abrir en Drive","SHA-256","MIME","ISO","Exposición","Apertura","Focal","Software","ALT / ARIA","Título / contexto","Fecha registro"];
-  const hallHeaders = ["ID","Señales","Tipo","Formato","Creador / persona","País","Ciudad","Cámara / celular","Fecha captura","GPS","Descripción","Colección(es)","Abrir en Drive"];
+  const hallHeaders = ["ID","Señales","Tipo","Formato","Creador / persona","País","Ciudad","Cámara / celular","Fecha captura","GPS","Descripción","Pista de contexto","Colección(es)","Abrir en Drive"];
   const dictRows = [
     ["ID","Identificador humano estable del activo","Base de datos","Ej. IMG-01 / VID-01"],
     ["Colección(es)","Colecciones a las que pertenece el activo","Supabase","ID público + nombre"],
@@ -715,13 +790,13 @@ async function syncMetadataSpreadsheet(userId, token, userFolders) {
 
   const dashboard = [
     ["WEB MEDIA COLLECTION · NAVEGADOR DE METADATOS"],
-    ["Actualización automática después de cada carga a Google Drive. Solo muestra datos respaldados por archivo o fuente."],
+    ["Sincronización automática con Google Drive: altas y eliminaciones manuales se reflejan en el navegador. Solo muestra datos respaldados por archivo o fuente."],
     [],
     ["Métrica","Valor"],
     ["Activos registrados", assets.length],
     ["Imágenes", images],
     ["Videos", videos],
-    ["Colecciones", collections.length],
+    ["Colecciones", activeCollections.length],
     ["Hallazgos interesantes", findings.length],
     ["Con creador/persona", coverageCounts.creator],
     ["Con país", coverageCounts.country],
@@ -745,9 +820,9 @@ async function syncMetadataSpreadsheet(userId, token, userFolders) {
       navHeaders,
       ...rows,
     ]},
-    { range: `${sheetNameA1("Hallazgos")}!A1:M${Math.max(4, findings.length + 3)}`, values: [
+    { range: `${sheetNameA1("Hallazgos")}!A1:N${Math.max(4, findings.length + 3)}`, values: [
       ["HALLAZGOS INTERESANTES"],
-      ["Solo aparecen activos con al menos una señal especialmente útil: creador, país, ciudad, cámara/celular, fecha, GPS o descripción."],
+      ["Separa metadatos embebidos de pistas de contexto de la página fuente. Una pista contextual no prueba identidad, ubicación ni autoría por sí sola."],
       hallHeaders,
       ...findings,
     ]},
@@ -806,6 +881,7 @@ async function syncMetadataSpreadsheet(userId, token, userFolders) {
     spreadsheetId: spreadsheet.id,
     spreadsheetUrl: `https://docs.google.com/spreadsheets/d/${spreadsheet.id}/edit`,
     assets: assets.length,
+    catalogedAssets: allAssets.length,
     findings: findings.length,
     durationMs: Date.now() - startedAt,
   };
@@ -814,7 +890,9 @@ async function syncMetadataSpreadsheet(userId, token, userFolders) {
 async function syncMetadataForUser(userId, token = null, userFolders = null) {
   const accessToken = token || await accessTokenForUser(userId);
   const folders = userFolders || await ensureUserDriveFolders(userId, accessToken);
-  return syncMetadataSpreadsheet(userId, accessToken, folders);
+  const reconciliation = await reconcileDriveCatalog(userId, accessToken, folders);
+  const sheet = await syncMetadataSpreadsheet(userId, accessToken, folders);
+  return { ...sheet, reconciliation };
 }
 
 async function syncAllMetadataSheetsOnStartup() {
@@ -1490,6 +1568,10 @@ server.listen(PORT, "0.0.0.0", () => {
   setTimeout(() => {
     syncAllMetadataSheetsOnStartup().catch(error => console.warn("Metadata startup sync:", error.message));
   }, 2500).unref?.();
+
+  setInterval(() => {
+    syncAllMetadataSheetsOnStartup().catch(error => console.warn("Metadata periodic sync:", error.message));
+  }, 2 * 60 * 1000).unref?.();
 });
 
 // metadata-sheet-autosync-deploy

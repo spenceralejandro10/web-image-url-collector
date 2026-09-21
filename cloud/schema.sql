@@ -92,6 +92,8 @@ create table if not exists public.assets (
   city text,
   country text,
   description text,
+  drive_present boolean not null default true,
+  drive_missing_since timestamptz,
   metadata_json jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
@@ -175,6 +177,7 @@ create index if not exists idx_collections_user on public.collections(user_id, c
 create index if not exists idx_assets_user_type on public.assets(user_id, media_type);
 create index if not exists idx_assets_user_format on public.assets(user_id, format);
 create index if not exists idx_assets_user_capture on public.assets(user_id, captured_at);
+create index if not exists idx_assets_user_drive_present on public.assets(user_id, drive_present);
 create index if not exists idx_sources_user_canonical on public.asset_sources(user_id, canonical_url);
 
 alter table public.users enable row level security;
