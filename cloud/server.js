@@ -1491,3 +1491,5 @@ server.listen(PORT, "0.0.0.0", () => {
     syncAllMetadataSheetsOnStartup().catch(error => console.warn("Metadata startup sync:", error.message));
   }, 2500).unref?.();
 });
+
+// metadata-sheet-autosync-deploy
