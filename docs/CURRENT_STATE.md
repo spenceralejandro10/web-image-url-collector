@@ -1,53 +1,76 @@
 # Estado actual del proyecto
 
 ## Versión activa
-**Spencer Collector Pro 4.2.3**
+**Spencer Collector Pro 4.2.4**
 
-Fecha de corrección: 2026-09-22.
+Fecha: 2026-09-22.
 
-## Flujo funcional vigente
+## Flujo vigente
 
-1. Extraer imágenes, GIF, WebP y videos de la pestaña web activa.
-2. Seleccionar o descartar recursos.
+1. Extraer imágenes, GIF, WebP y videos.
+2. Seleccionar o descartar contenido.
 3. Analizar información y metadatos.
-4. Descargar un ZIP.
+4. Descargar un ZIP local.
 
-La extensión activa **no sube archivos a Google Drive**.
+Google Drive no forma parte del flujo activo.
 
-Railway se conserva únicamente para:
-- comprobación de salud del servicio;
-- análisis profundo de metadatos;
-- construcción del ZIP final.
+## Selector
 
-Backend configurado:
+Al abrir el selector se conserva el ID de la pestaña de origen. Al pulsar **Aplicar selección y cerrar**, la extensión reactiva esa pestaña y cierra el selector.
+
+## GIF
+
+La detección ya no depende solo de URLs terminadas en `.gif`. Se revisan:
+- `img/src/srcset`;
+- atributos `data-*`;
+- recursos observados mediante `performance.getEntriesByType("resource")`;
+- meta tags;
+- HTML serializado con URLs GIF escapadas;
+- parámetros como `format=gif`, `fm=gif` o `type=gif`.
+
+La clasificación final del backend también usa el `Content-Type`, por lo que `image/gif` se guarda como GIF aunque la URL sea ambigua.
+
+## Video
+
+La extensión:
+- detecta MP4, M4V, MOV y WebM;
+- agrupa variantes de un mismo stream;
+- prioriza variantes de mayor resolución;
+- separa URLs que parecen audio-only;
+- relaciona audio compañero con el video cuando comparten grupo;
+- reutiliza imágenes del mismo Pin como poster cuando el video no trae uno.
+
+El backend:
+- usa FFmpeg para inspeccionar las pistas;
+- descarta recursos que contienen audio pero ninguna pista de video;
+- mantiene MP4/H.264 compatibles cuando no necesitan conversión;
+- convierte codecs incompatibles a MP4 H.264/AAC;
+- intenta combinar un audio compañero si el video principal no trae audio.
+
+## Backend
+
+URL:
 `https://wmc-api-production.up.railway.app`
 
-## Permisos de Chrome
+Versión esperada por la extensión: **4.2.4**.
 
-Permisos base:
-- `activeTab`
-- `scripting`
-- `sidePanel`
-- `storage`
+Railway usa `cloud/` como raíz del servicio `wmc-api`.
 
-Acceso web:
-- declarado como `optional_host_permissions` para `http://*/*` y `https://*/*`;
-- se solicita al usuario al pulsar **Extraer contenido**;
-- esto corrige el error `Cannot access contents of the page. Extension manifest must request permission to access the respective host.`.
+## Carpeta que debe cargarse en Chrome
 
-## Carpeta que se debe cargar en Chrome
+`extension/Spencer-Collector-Pro-4.2.4/`
 
-`extension/Spencer-Collector-Pro-4.2.3/`
-
-El archivo `manifest.json` debe estar directamente dentro de esa carpeta.
+`manifest.json` debe estar directamente dentro de la carpeta seleccionada.
 
 ## Regla de mantenimiento
 
-No entregar una nueva versión sin:
-1. actualizar el número de versión;
-2. probar extracción en una página HTTPS real;
-3. confirmar que el selector abre;
-4. confirmar que el análisis responde;
-5. confirmar que el ZIP se genera;
-6. confirmar que no aparece ninguna sección de Google Drive;
-7. actualizar esta documentación y CHANGELOG.
+Antes de entregar:
+1. comprobar extracción HTTPS;
+2. confirmar que Chrome solicita permisos web cuando corresponda;
+3. confirmar regreso desde selector a pestaña de origen;
+4. comprobar GIF reales y GIF con URL escapada;
+5. comprobar video normal, video sin poster, stream audio-only y codec no compatible;
+6. comprobar análisis;
+7. comprobar ZIP;
+8. confirmar que Google Drive no aparece en la extensión;
+9. actualizar documentación.
