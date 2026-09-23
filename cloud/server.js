@@ -18,7 +18,7 @@ const {
   buildZip,
 } = require("./media");
 
-const VERSION = "4.2.0";
+const VERSION = "4.2.4";
 const PORT = Number(process.env.PORT || 8787);
 const APP_BASE_URL = (process.env.APP_BASE_URL || "").replace(/\/$/, "");
 const DB_FUNCTION_URL = process.env.WMC_DB_FUNCTION_URL || "";
@@ -1384,13 +1384,15 @@ const server = http.createServer(async (req, res) => {
         zipDownloads.delete(token);
         await fsp.unlink(entry.zipPath).catch(() => {});
       }, ZIP_TTL_MS).unref?.();
-      const successful = built.inventory.filter(x => !x.error).length;
+      const successful = built.inventory.filter(x => !x.error && !x.skipped).length;
+      const skipped = built.inventory.filter(x => x.skipped).length;
       const failed = built.inventory.filter(x => x.error).length;
       return json(res, 200, {
         ok: true,
         filename,
         total: candidates.length,
         successful,
+        skipped,
         failed,
         bytes: built.bytes,
         downloadUrl: `${APP_BASE_URL}/api/zip-download/${token}`,
