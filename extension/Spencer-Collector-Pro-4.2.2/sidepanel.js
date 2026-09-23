@@ -483,16 +483,13 @@ $("scan").addEventListener("click", async () => {
   log("Escaneo iniciado.");
 
   try {
-    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    let tab = tabs.find(candidate => /^https?:/i.test(candidate.url || ""));
-
-    if (!tab) {
-      const activeTabs = await chrome.tabs.query({ active: true });
-      tab = activeTabs.find(candidate => /^https?:/i.test(candidate.url || ""));
-    }
+    const [tab] = await chrome.tabs.query({
+      active: true,
+      currentWindow: true
+    });
 
     if (!tab?.id) {
-      throw new Error("No se encontró una página web activa para escanear.");
+      throw new Error("No se encontró la pestaña activa.");
     }
 
     const injection = await chrome.scripting.executeScript({
