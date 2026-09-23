@@ -2,15 +2,13 @@
 
 Versión operativa documentada: **4.2.0**.
 
-## Descarga directa de la extensión 4.2.0
+## Estado de distribución de la extensión 4.2.0
 
-Para usar la extensión no necesitas reconstruir el respaldo.
+El ZIP de descarga directa fue retirado temporalmente después de que Windows/Chrome mostrara una detección antivirus al descargarlo.
 
-Descarga directamente:
+**No desactives Microsoft Defender ni fuerces la descarga.**
 
-`release/Spencer-Collector-Pro-4.2.0.zip`
-
-La carpeta `backup/extension-4.2.0/` queda únicamente como respaldo técnico de recuperación.
+La fuente y el respaldo técnico se conservan para auditoría y reconstrucción segura. La carpeta `backup/extension-4.2.0/` no debe usarse como instalador mientras la revisión esté abierta.
 
 Este repositorio conserva únicamente la arquitectura funcional actual del proyecto. La documentación histórica y las versiones anteriores ya no forman parte del árbol activo.
 
