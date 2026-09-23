@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Selector visual · Web Media Collector David Spencer</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:#f5f7fa;color:#172033}.top{position:sticky;top:0;z-index:5;background:#fff;border-bottom:1px solid #dde3ea;padding:14px 18px;box-shadow:0 2px 10px rgba(0,0,0,.04)}.brand{display:flex;align-items:center;gap:12px}.brand img{width:52px;height:52px;border-radius:16px;object-fit:cover;border:2px solid #dbe4f0;box-shadow:0 6px 16px rgba(23,32,51,.12)}.brand-copy h1{font-size:19px;margin:0 0 4px}.brand-copy .sub{font-size:12px;color:#667085;line-height:1.55}.brand-copy .quote{font-size:11px;color:#172033;font-weight:700;margin-top:6px}.toolbar{display:grid;grid-template-columns:minmax(180px,1fr) auto auto;gap:8px;margin-top:12px}.search{border:1px solid #cfd7e3;border-radius:8px;padding:10px;font-size:13px}.btn{border:0;border-radius:8px;padding:10px 14px;font-weight:700;cursor:pointer;background:#e9edf2;color:#172033}.primary{background:#172033;color:#fff}.dedupe{background:#175cd3;color:#fff}.btn:disabled{opacity:.55;cursor:not-allowed}.dedupeStatus{font-size:12px;margin-top:8px;color:#475467}.duplicate{opacity:.62}.duplicate::after{content:"Duplicado";position:absolute;left:8px;top:8px;background:#b42318;color:#fff;border-radius:6px;padding:4px 7px;font-size:10px;font-weight:700;z-index:4}.counts{font-size:12px;font-weight:700;margin-top:10px}.bulkbar{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}.bulk{padding:7px 10px;font-size:11px}.danger{background:#fff1f0;color:#b42318;border:1px solid #fecdca}.filters{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}.chip{border:1px solid #cfd7e3;background:#fff;border-radius:999px;padding:7px 10px;font-size:11px;font-weight:700;cursor:pointer}.chip.active{background:#172033;color:#fff;border-color:#172033}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px;padding:18px}.card{position:relative;background:#fff;border:2px solid transparent;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.06);cursor:pointer}.card.selected{border-color:#175cd3}.thumb{width:100%;aspect-ratio:1/1;object-fit:cover;background:#e9edf2;display:block}.videoWrap{position:relative;background:#101828}.videoBadge{position:absolute;left:8px;bottom:8px;background:rgba(16,24,40,.78);color:#fff;padding:4px 7px;border-radius:6px;font-size:10px;font-weight:700}.previewFallback{width:100%;aspect-ratio:1/1;background:#eef2f6;color:#667085;display:flex;align-items:center;justify-content:center;text-align:center;padding:14px;font-size:11px;line-height:1.4}.info{padding:9px;font-size:11px}.name{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.meta{color:#667085;margin-top:4px}.check{position:absolute;top:8px;right:8px;width:25px;height:25px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.94);font-weight:700;z-index:3;border:1px solid rgba(0,0,0,.08)}.selected .check{background:#175cd3;color:#fff}.empty{padding:40px;text-align:center;color:#667085}
+@media(max-width:760px){.toolbar{grid-template-columns:1fr}.search{grid-column:1}.brand{align-items:flex-start}}
+</style>
+</head>
+<body>
+<div class="top">
+  <div class="brand">
+    <img src="profile-spencer-collector.jpg" alt="Foto de perfil Spencer Collector Pro">
+    <div class="brand-copy">
+      <h1>Selector visual · Spencer Collector Pro</h1>
+      <div class="sub">Haz clic sobre cada imagen, GIF, WebP o video para incluirlo o descartarlo. El contador queda sincronizado con el panel principal y solo los seleccionados pasarán al análisis, ZIP y Google Drive.</div><div class="quote">Explora · Analiza · Controla · Sincroniza</div>
+    </div>
+  </div>
+  <div class="toolbar">
+    <input id="search" class="search" placeholder="Buscar por texto, URL o formato...">
+    <button id="dedupe" class="btn dedupe">Detectar y descartar duplicados</button>
+    <button id="applyClose" class="btn primary">Aplicar selección y cerrar</button>
+  </div>
+  <div class="filters" id="filters"></div>
+  <div class="bulkbar">
+    <button id="selectVisible" class="btn bulk">Seleccionar visibles</button>
+    <button id="deselectVisible" class="btn bulk">Deseleccionar visibles</button>
+    <button id="deselectAll" class="btn bulk danger">Deseleccionar todo</button>
+  </div>
+  <div id="dedupeStatus" class="dedupeStatus">Los duplicados se detectan por huella visual; se conserva automáticamente la mejor copia disponible.</div>
+  <div class="counts">Seleccionados: <span id="selectedCount">0</span> de <span id="totalCount">0</span> · Mostrando: <span id="visibleCount">0</span></div>
+</div>
+<div id="grid" class="grid"></div>
+<script src="selector.js"></script>
+</body>
+</html>
