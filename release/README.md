@@ -1,18 +1,13 @@
-# Descarga lista · Spencer Collector Pro 4.2.0
+# Spencer Collector Pro 4.2.0 · distribución en revisión
 
-Esta carpeta contiene la extensión ya reconstruida y lista para descargar.
+El ZIP de descarga directa fue retirado temporalmente porque Windows/Chrome reportó una detección antivirus durante la descarga.
 
-## Archivo
+No desactives Microsoft Defender ni agregues exclusiones para instalar esta versión.
 
-- `Spencer-Collector-Pro-4.2.0.zip`
+Revisión estática realizada sobre el contenido del paquete:
+- no se encontraron llamadas a `eval()` ni `new Function()`;
+- no se encontraron PowerShell, cmd.exe, WScript, rundll32 ni Native Messaging;
+- la extensión usa permisos sensibles legítimos para su función: `activeTab`, `scripting`, `downloads`, `storage` y acceso web amplio;
+- el único backend HTTP(S) codificado en la extensión es `https://wmc-api-production.up.railway.app`.
 
-No necesitas unir archivos `.b64`, ejecutar PowerShell ni usar `RESTORE.ps1`.
-
-Después de descargar:
-1. Extrae el ZIP.
-2. Abre `chrome://extensions`.
-3. Activa **Modo de desarrollador**.
-4. Pulsa **Cargar descomprimida**.
-5. Selecciona la carpeta extraída `web-media-collector-4.2-david-spencer`.
-
-El respaldo fragmentado de `backup/extension-4.2.0/` se conserva únicamente para recuperación técnica.
+La detección del antivirus debe identificarse antes de volver a publicar un instalable.
