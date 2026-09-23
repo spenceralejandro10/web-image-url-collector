@@ -1181,7 +1181,7 @@ $("download").addEventListener("click", async () => {
   $("download").disabled = true;
   $("downloadBar").style.width = "8%";
   $("downloadProgress").textContent = `Preparando ZIP con ${selected.length} recursos...`;
-  $("downloadEta").textContent = "El servidor local descargará los archivos y construirá un único ZIP.";
+  $("downloadEta").textContent = "El servicio preparará los archivos y construirá un único ZIP reproducible.";
 
   try {
     await requireCompatibleServer();
@@ -1199,7 +1199,7 @@ $("download").addEventListener("click", async () => {
     await chrome.tabs.create({ url: data.downloadUrl });
 
     $("downloadBar").style.width = "100%";
-    $("downloadProgress").innerHTML = `<span class="success">✓ ZIP preparado: ${data.successful} archivos · ${data.failed} fallos</span>`;
+    $("downloadProgress").innerHTML = `<span class="success">✓ ZIP preparado: ${data.successful} archivos · ${data.skipped || 0} streams descartados · ${data.failed} fallos</span>`;
     $("downloadEta").textContent = "Incluye inventario.json con URLs, SHA-256 y metadatos recopilados.";
     log(`ZIP generado para ${selected.length} recursos. Correctos: ${data.successful}; fallos: ${data.failed}.`);
   } catch (error) {
