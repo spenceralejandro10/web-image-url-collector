@@ -2,6 +2,16 @@
 
 Versión operativa documentada: **4.2.0**.
 
+## Descarga directa de la extensión 4.2.0
+
+Para usar la extensión no necesitas reconstruir el respaldo.
+
+Descarga directamente:
+
+`release/Spencer-Collector-Pro-4.2.0.zip`
+
+La carpeta `backup/extension-4.2.0/` queda únicamente como respaldo técnico de recuperación.
+
 Este repositorio conserva únicamente la arquitectura funcional actual del proyecto. La documentación histórica y las versiones anteriores ya no forman parte del árbol activo.
 
 ## Qué hace
