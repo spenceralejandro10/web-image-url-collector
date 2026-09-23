@@ -5,10 +5,12 @@ const os = require("node:os");
 const crypto = require("node:crypto");
 const { Transform, Readable } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
+const { spawn } = require("node:child_process");
 const archiver = require("archiver");
+const ffmpegPath = require("ffmpeg-static");
 const exifr = require("exifr");
 
-const VERSION = "4.1.0";
+const VERSION = "4.2.4";
 
 function canonicalizeUrl(value) {
   const u = new URL(value);
@@ -100,6 +102,108 @@ async function downloadAndHash(url, alternateUrls = [], sourcePage = "") {
     } catch (e) { await fsp.unlink(temp).catch(()=>{}); errors.push(`${candidate} -> ${e.message}`); }
   }
   throw new Error(`No se pudo descargar el recurso. ${errors.slice(0,6).join(" | ")}${errors.length>6?" | ...":""}`);
+}
+
+
+function runFfmpeg(args, { allowNonZero = false } = {}) {
+  return new Promise((resolve, reject) => {
+    if (!ffmpegPath) return reject(new Error("FFmpeg no está disponible en el servidor."));
+    const child = spawn(ffmpegPath, args, { windowsHide: true });
+    let stderr = "";
+    child.stderr.on("data", chunk => {
+      if (stderr.length < 2_000_000) stderr += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("close", code => {
+      if (code === 0 || allowNonZero) return resolve({ code, stderr });
+      reject(new Error(stderr.trim() || `FFmpeg terminó con código ${code}`));
+    });
+  });
+}
+
+async function probeVideo(tempPath) {
+  if (!ffmpegPath) {
+    return { available:false, hasVideo:true, hasAudio:false, videoCodec:null, audioCodec:null, raw:"" };
+  }
+  const { stderr } = await runFfmpeg(["-hide_banner", "-i", tempPath], { allowNonZero:true });
+  const video = stderr.match(/Stream #.*?: Video:\s*([a-zA-Z0-9_]+)/i);
+  const audio = stderr.match(/Stream #.*?: Audio:\s*([a-zA-Z0-9_]+)/i);
+  return {
+    available:true,
+    hasVideo:Boolean(video),
+    hasAudio:Boolean(audio),
+    videoCodec:video?.[1]?.toLowerCase() || null,
+    audioCodec:audio?.[1]?.toLowerCase() || null,
+    raw:stderr
+  };
+}
+
+async function hashFile(filePath) {
+  const hash = crypto.createHash("sha256");
+  let bytes = 0;
+  await pipeline(
+    fs.createReadStream(filePath),
+    new Transform({
+      transform(chunk, enc, cb) {
+        hash.update(chunk);
+        bytes += chunk.length;
+        cb(null, chunk);
+      }
+    }),
+    new Transform({
+      transform(chunk, enc, cb) { cb(); }
+    })
+  );
+  return { sha256:hash.digest("hex"), bytes };
+}
+
+async function normalizeVideoForWindows(videoPath, ext, audioPath = "") {
+  const probe = await probeVideo(videoPath);
+  if (probe.available && !probe.hasVideo) {
+    return { skipped:true, reason:"audio-only", probe };
+  }
+
+  const videoCodec = probe.videoCodec || "";
+  const audioCodec = probe.audioCodec || "";
+  const mp4Like = ["mp4","m4v"].includes(String(ext || "").toLowerCase());
+  const needsAudioMerge = Boolean(audioPath && probe.available && !probe.hasAudio);
+  const compatibleVideo = !probe.available || (mp4Like && videoCodec === "h264");
+  const compatibleAudio = !probe.available || !probe.hasAudio || audioCodec === "aac";
+
+  if (compatibleVideo && compatibleAudio && !needsAudioMerge) {
+    return { path:videoPath, extension:"mp4", mime:"video/mp4", normalized:false, probe };
+  }
+
+  const output = path.join(os.tmpdir(), `wmc-video-${crypto.randomUUID()}.mp4`);
+  const args = ["-y","-hide_banner","-loglevel","error","-i",videoPath];
+  if (needsAudioMerge) args.push("-i",audioPath);
+
+  args.push("-map","0:v:0");
+  if (probe.hasAudio) args.push("-map","0:a:0?");
+  else if (needsAudioMerge) args.push("-map","1:a:0?");
+
+  if (videoCodec === "h264") {
+    args.push("-c:v","copy");
+  } else {
+    args.push("-c:v","libx264","-preset","veryfast","-crf","23","-pix_fmt","yuv420p");
+  }
+
+  if (probe.hasAudio || needsAudioMerge) {
+    if (probe.hasAudio && audioCodec === "aac" && !needsAudioMerge) args.push("-c:a","copy");
+    else args.push("-c:a","aac","-b:a","128k");
+  }
+
+  args.push("-movflags","+faststart",output);
+
+  try {
+    await runFfmpeg(args);
+    const stat = await fsp.stat(output);
+    if (!stat.size) throw new Error("FFmpeg generó un archivo vacío.");
+    return { path:output, extension:"mp4", mime:"video/mp4", normalized:true, probe };
+  } catch (error) {
+    await fsp.unlink(output).catch(()=>{});
+    throw error;
+  }
 }
 
 function countBytes(buffer, value) { let n=0; for (let i=0;i<buffer.length;i++) if (buffer[i]===value) n++; return n; }
@@ -203,24 +307,114 @@ async function buildZip(candidates) {
   const zipPath = path.join(os.tmpdir(),`web-media-collector-${crypto.randomUUID()}.zip`);
   const output = fs.createWriteStream(zipPath);
   const archive = archiver("zip",{zlib:{level:0}});
-  const done = new Promise((resolve,reject)=>{ output.on("close",resolve); output.on("error",reject); archive.on("error",reject); });
+  const done = new Promise((resolve,reject)=>{
+    output.on("close",resolve);
+    output.on("error",reject);
+    archive.on("error",reject);
+  });
   archive.pipe(output);
-  const inventory=[],used=new Set(),temps=[];
+
+  const inventory=[];
+  const used=new Set();
+  const temps=[];
+
   for (let i=0;i<candidates.length;i++) {
-    const item=candidates[i]; let canonical="",dl=null;
+    const item=candidates[i];
+    let canonical="";
+    let dl=null;
     try {
       canonical=canonicalizeUrl(item.url);
-      dl=await downloadAndHash(canonical,item.alternateUrls || [],item.sourcePage || ""); temps.push(dl.temp);
-      const ext=extFrom(dl.finalUrl || canonical,dl.mime,item.extension); const cat=category(ext,dl.mime,item.kind);
+      dl=await downloadAndHash(canonical,item.alternateUrls || [],item.sourcePage || "");
+      temps.push(dl.temp);
+
+      let ext=extFrom(dl.finalUrl || canonical,dl.mime,item.extension);
+      let mime=dl.mime;
+      let cat=category(ext,mime,item.kind);
+      let filePath=dl.temp;
+      let sha256=dl.sha256;
+      let bytes=dl.bytes;
+      let normalized=false;
+      let videoProbe=null;
+
+      if (cat === "VIDEO") {
+        let audioDl=null;
+        if (item.audioUrl) {
+          try {
+            audioDl=await downloadAndHash(item.audioUrl,[],item.sourcePage || "");
+            temps.push(audioDl.temp);
+          } catch {}
+        }
+
+        const converted=await normalizeVideoForWindows(filePath,ext,audioDl?.temp || "");
+        videoProbe=converted.probe || null;
+
+        if (converted.skipped) {
+          inventory.push({
+            index:i+1,
+            url:canonical,
+            downloadedUrl:dl.finalUrl || canonical,
+            skipped:true,
+            reason:"stream de audio sin video",
+            category:"VIDEO",
+            metadata:item.metadata || {}
+          });
+          continue;
+        }
+
+        if (converted.path !== filePath) temps.push(converted.path);
+        filePath=converted.path;
+        ext=converted.extension;
+        mime=converted.mime;
+        normalized=converted.normalized;
+        cat="VIDEO";
+        const hashed=await hashFile(filePath);
+        sha256=hashed.sha256;
+        bytes=hashed.bytes;
+      }
+
       const base=cleanName(item.suggestedName) || `recurso-${String(i+1).padStart(4,"0")}`;
       const zipEntry=uniqueZipPath(`${cat}/${String(i+1).padStart(4,"0")} - ${base}.${ext}`,used);
-      archive.file(dl.temp,{name:zipEntry});
-      inventory.push({index:i+1,zipEntry,url:canonical,downloadedUrl:dl.finalUrl || canonical,sha256:dl.sha256,bytes:dl.bytes,mimeType:dl.mime,extension:ext,category:cat,suggestedName:item.suggestedName || null,metadata:item.metadata || {}});
-    } catch (e) { inventory.push({index:i+1,url:canonical || item.url,error:e.message,metadata:item.metadata || {}}); }
+      archive.file(filePath,{name:zipEntry});
+      inventory.push({
+        index:i+1,
+        zipEntry,
+        url:canonical,
+        downloadedUrl:dl.finalUrl || canonical,
+        sha256,
+        bytes,
+        mimeType:mime,
+        extension:ext,
+        category:cat,
+        normalizedVideo:normalized,
+        videoCodec:videoProbe?.videoCodec || null,
+        audioCodec:videoProbe?.audioCodec || null,
+        hasAudio:videoProbe?.hasAudio ?? null,
+        suggestedName:item.suggestedName || null,
+        metadata:item.metadata || {}
+      });
+    } catch (e) {
+      inventory.push({
+        index:i+1,
+        url:canonical || item.url,
+        error:e.message,
+        metadata:item.metadata || {}
+      });
+    }
   }
-  archive.append(JSON.stringify({generatedAt:new Date().toISOString(),version:VERSION,totalRequested:candidates.length,successful:inventory.filter(x=>!x.error).length,failed:inventory.filter(x=>x.error).length,items:inventory},null,2),{name:"inventario.json"});
-  await archive.finalize(); await done;
-  for (const temp of temps) await fsp.unlink(temp).catch(()=>{});
+
+  archive.append(JSON.stringify({
+    generatedAt:new Date().toISOString(),
+    version:VERSION,
+    totalRequested:candidates.length,
+    successful:inventory.filter(x=>!x.error && !x.skipped).length,
+    skipped:inventory.filter(x=>x.skipped).length,
+    failed:inventory.filter(x=>x.error).length,
+    items:inventory
+  },null,2),{name:"inventario.json"});
+
+  await archive.finalize();
+  await done;
+  for (const temp of [...new Set(temps)]) await fsp.unlink(temp).catch(()=>{});
   const stat=await fsp.stat(zipPath);
   return {zipPath,inventory,bytes:stat.size};
 }
